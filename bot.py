@@ -2,6 +2,7 @@ import os
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 from pymongo import MongoClient
+import certifi  # SSL Handshake Error फ़िक्स करने के लिए
 from datetime import datetime, timedelta
 from apscheduler.schedulers.background import BackgroundScheduler
 from flask import Flask
@@ -10,7 +11,8 @@ from threading import Thread
 # --- RENDER KEEP-ALIVE SERVER ---
 app = Flask('')
 @app.route('/')
-def home(): return "Bot is running and healthy!"
+def home(): 
+    return "Bot is running and healthy!"
 
 def run_web():
     port = int(os.environ.get("PORT", 5000))
@@ -27,7 +29,9 @@ UPI_ID = os.getenv('UPI_ID')
 CONTACT_USERNAME = os.getenv('CONTACT_USERNAME')
 
 bot = telebot.TeleBot(BOT_TOKEN)
-client = MongoClient(MONGO_URI)
+
+# SSL Certificate verification fix added via certifi
+client = MongoClient(MONGO_URI, tlsCAFile=certifi.where())
 db = client['sub_management']
 channels_col = db['channels']
 users_col = db['users']
@@ -56,7 +60,8 @@ def start_handler(message):
                     f"Welcome!\n\nYou are joining: *{ch_data['name']}*.\n\nPlease select a subscription plan below:", 
                     reply_markup=markup, parse_mode="Markdown")
                 return
-        except: pass
+        except: 
+            pass
 
     # Admin Panel Greeting
     if user_id == ADMIN_ID:
@@ -106,17 +111,33 @@ def get_plans(message):
 
 def finalize_channel(message, ch_id, ch_name):
     try:
-        raw_plans = message.text.split(',')
+        raw_text = message.text.strip()
         plans_dict = {}
-        for p in raw_plans:
-            t, pr = p.strip().split(':')
-            plans_dict[t] = pr
         
-        channels_col.update_one({"channel_id": ch_id}, {"$set": {"name": ch_name, "plans": plans_dict, "admin_id": ADMIN_ID}}, upsert=True)
+        for p in raw_text.split(','):
+            if ':' in p:
+                parts = p.split(':')
+                if len(parts) == 2:
+                    t = str(parts[0].strip())
+                    pr = str(parts[1].strip())
+                    if t.isdigit() and pr.isdigit():
+                        plans_dict[t] = pr
+
+        if not plans_dict:
+            bot.send_message(ADMIN_ID, "❌ Invalid format. Please use `Min:Price, Min:Price`. Use /add to retry.")
+            return
+        
+        channels_col.update_one(
+            {"channel_id": int(ch_id)}, 
+            {"$set": {"name": str(ch_name), "plans": plans_dict, "admin_id": int(ADMIN_ID)}}, 
+            upsert=True
+        )
+        
         bot_username = bot.get_me().username
         bot.send_message(ADMIN_ID, f"✅ Setup Successful!\n\nInvite Link for users:\n`https://t.me/{bot_username}?start={ch_id}`", parse_mode="Markdown")
-    except:
-        bot.send_message(ADMIN_ID, "❌ Invalid format. Please use `Min:Price, Min:Price`. Use /add to retry.")
+    
+    except Exception as e:
+        bot.send_message(ADMIN_ID, f"❌ Error: {str(e)}\n\nPlease use /add to retry.")
 
 # --- USER: PAYMENT FLOW ---
 
@@ -169,7 +190,7 @@ def approve_now(call):
         
         users_col.update_one({"user_id": u_id, "channel_id": ch_id}, {"$set": {"expiry": expiry_datetime.timestamp()}}, upsert=True)
         
-        bot.send_message(u_id, f"🥳 *Payment Approved!*\n\nSubscription: {mins} Minutes\n\nJoin Link: {link.invite_link}\n\n⚠️ Note: This link and your access will expire in {mins} minutes.", parse_mode="Markdown")
+        bot.send_message(u_id, f"🥳 *Payment Approved!*\n\nSubscription: {mins} Minutes\n\nJoin Link: {link.invite_link}\n\n⚠️️ Note: This link and your access will expire in {mins} minutes.", parse_mode="Markdown")
         bot.edit_message_text(f"✅ Approved user {u_id} for {mins} mins.", call.message.chat.id, call.message.message_id)
         
     except Exception as e:
@@ -201,7 +222,8 @@ def kick_expired_users():
             
             bot.send_message(user['user_id'], "⚠️ Your subscription has expired.\n\nTo join again or renew, please click the button below:", reply_markup=markup)
             users_col.delete_one({"_id": user['_id']})
-        except: pass
+        except: 
+            pass
 
 # --- STARTUP ---
 if __name__ == '__main__':
